@@ -14,7 +14,7 @@ nvbuf-memory-type=0
 [source0]
 enable=1
 type=3
-uri=file:///opt/nvidia/deepstream/deepstream/samples/streams/sample_1080p_h264.mp4
+uri=file:///home/flotech/DeepStream-Yolo/Top_view_normal_20min_normal_lens_3_h264.mp4
 num-sources=1
 gpu-id=0
 cudadec-memtype=0
@@ -56,7 +56,7 @@ enable=1
 gpu-id=0
 gie-unique-id=1
 nvbuf-memory-type=0
-config-file=config_infer_primary.txt
+config-file=config_infer_primary_yolo11.txt
 
 [tests]
 file-loop=0
