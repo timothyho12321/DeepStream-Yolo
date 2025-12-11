@@ -77,11 +77,24 @@ side_stats = {"current": 0, "stabilized": 0}
 
 stats_lock = threading.Lock()
 
+# --- NEW ALGORITHM: 95th Percentile ---
 def get_stabilized_count(buffer):
     if len(buffer) == 0:
         return 0
-    counts = Counter(buffer)
-    return counts.most_common(1)[0][0]
+
+    # Sort the buffer to organize counts from low to high
+    sorted_buffer = sorted(buffer)
+
+    # Calculate the index for the 95th percentile
+    # This ignores the bottom 95% (undercounts due to occlusion)
+    # and ignores the top 5% (potential overcounts/noise)
+    index = int(len(sorted_buffer) * 0.95)
+
+    # Ensure index is within valid bounds
+    if index >= len(sorted_buffer):
+        index = len(sorted_buffer) - 1
+
+    return sorted_buffer[index]
 
 # --- PROBES ---
 
@@ -109,14 +122,14 @@ def top_infer_src_probe(pad, info, u_data):
             stab = top_stats["stabilized"]
 
         # Print to Terminal
-        print(f"[TOP] Frame={frame_meta.frame_num} | Current={cur} | Stabilized(10s)={stab}")
+        print(f"[TOP] Frame={frame_meta.frame_num} | Current={cur} | Stabilized(95%)={stab}")
 
         # Write to CSV
         with open(TOP_CSV_FILE, 'a', newline='') as f:
             writer = csv.writer(f)
             writer.writerow([frame_meta.frame_num, cur, stab])
 
-        # 2. Draw Text Immediately (Before Compositor)
+        # 2. Draw Text Immediately
         display_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
         display_meta.num_labels = 1
 
@@ -163,14 +176,14 @@ def side_infer_src_probe(pad, info, u_data):
             stab = side_stats["stabilized"]
 
         # Print to Terminal
-        print(f"[SIDE] Frame={frame_meta.frame_num} | Current={cur} | Stabilized(10s)={stab}")
+        print(f"[SIDE] Frame={frame_meta.frame_num} | Current={cur} | Stabilized(95%)={stab}")
 
         # Write to CSV
         with open(SIDE_CSV_FILE, 'a', newline='') as f:
             writer = csv.writer(f)
             writer.writerow([frame_meta.frame_num, cur, stab])
 
-        # 2. Draw Text Immediately (Before Compositor)
+        # 2. Draw Text Immediately
         display_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
         display_meta.num_labels = 1
 
@@ -240,10 +253,8 @@ def main():
     top_infer.set_property('config-file-path', TOP_CONFIG)
 
     top_conv = Gst.ElementFactory.make("nvvideoconvert", "top-conv")
-    # nvdsosd requires RGBA, so we ensure the convert produces it
-
     top_osd = Gst.ElementFactory.make("nvdsosd", "top-osd")
-    top_osd.set_property('display-clock', 0) # disable clock to just show our text
+    top_osd.set_property('display-clock', 0)
 
     # ==========================
     # 2. SIDE VIEW BRANCH
@@ -260,7 +271,6 @@ def main():
     side_infer.set_property('config-file-path', SIDE_CONFIG)
 
     side_conv = Gst.ElementFactory.make("nvvideoconvert", "side-conv")
-
     side_osd = Gst.ElementFactory.make("nvdsosd", "side-osd")
     side_osd.set_property('display-clock', 0)
 
@@ -268,7 +278,6 @@ def main():
     # 3. COMPOSITION
     # ==========================
     compositor = Gst.ElementFactory.make("nvcompositor", "compositor")
-
     sink = Gst.ElementFactory.make("nveglglessink", "nvvideo-renderer")
     sink.set_property("sync", 0)
 
@@ -289,18 +298,16 @@ def main():
     top_source.connect("pad-added", cb_newpad, top_mux)
     side_source.connect("pad-added", cb_newpad, side_mux)
 
-    # --- STATIC LINKING (TOP) ---
+    # --- STATIC LINKING ---
     top_mux.link(top_infer)
     top_infer.link(top_conv)
     top_conv.link(top_osd)
 
-    # --- STATIC LINKING (SIDE) ---
     side_mux.link(side_infer)
     side_infer.link(side_conv)
     side_conv.link(side_osd)
 
     # --- COMPOSITOR LINKING ---
-    # Top Branch -> Compositor Sink 0 (Left Half)
     t_pad = top_osd.get_static_pad("src")
     comp_pad_0 = compositor.request_pad_simple("sink_%u")
     comp_pad_0.set_property("xpos", 0)
@@ -309,7 +316,6 @@ def main():
     comp_pad_0.set_property("height", 1080)
     t_pad.link(comp_pad_0)
 
-    # Side Branch -> Compositor Sink 1 (Right Half)
     s_pad = side_osd.get_static_pad("src")
     comp_pad_1 = compositor.request_pad_simple("sink_%u")
     comp_pad_1.set_property("xpos", 960)
@@ -318,7 +324,6 @@ def main():
     comp_pad_1.set_property("height", 1080)
     s_pad.link(comp_pad_1)
 
-    # Compositor -> Sink
     compositor.link(sink)
 
     # --- ATTACH PROBES ---
@@ -334,7 +339,7 @@ def main():
     bus.add_signal_watch()
     bus.connect ("message", bus_call, loop)
 
-    print("Starting Dual View Pipeline...")
+    print("Starting Dual View Pipeline with 95th Percentile Stabilization...")
     pipeline.set_state(Gst.State.PLAYING)
     try:
         loop.run()
