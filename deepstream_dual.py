@@ -28,9 +28,7 @@ TOP_CONFIG = "config_infer_primary_yoloV8.txt"
 SIDE_CONFIG = "config_infer_primary_yoloV8_side.txt"
 
 # --- VIEW SETTINGS (MANUAL ADJUSTMENT) ---
-# Original Video is 1920 x 1080 (Aspect Ratio 16:9)
-# To display them side-by-side on a standard monitor, we split the width.
-# Width: 960 (Half of 1920)
+# Width: 960
 # Height: 540 (Calculated as 960 / 1.77 to preserve aspect ratio)
 VIEW_WIDTH = 960
 VIEW_HEIGHT = 540
@@ -68,9 +66,10 @@ with open(SIDE_CSV_FILE, 'w', newline='') as f:
 
 print(f"[OK] CSV files created: {TOP_CSV_FILE}, {SIDE_CSV_FILE}")
 
-# Stabilization Settings
+# --- STABILIZATION SETTINGS ---
 FPS = 30
-WINDOW_SECONDS = 10
+# Increased to 30 seconds to bridge gaps during heavy occlusion
+WINDOW_SECONDS = 30
 BUFFER_SIZE = FPS * WINDOW_SECONDS
 
 # Global State
@@ -86,10 +85,17 @@ stats_lock = threading.Lock()
 def get_stabilized_count(buffer):
     if len(buffer) == 0:
         return 0
+
     sorted_buffer = sorted(buffer)
+
+    # 95th Percentile Strategy
+    # This filters out the top 5% of data (ignoring noise like 21 or 22)
+    # But ensures we capture the "true max" (20) even if it only appears ~10-15% of the time.
     index = int(len(sorted_buffer) * 0.95)
+
     if index >= len(sorted_buffer):
         index = len(sorted_buffer) - 1
+
     return sorted_buffer[index]
 
 # --- PROBES ---
@@ -308,7 +314,7 @@ def main():
     bus.add_signal_watch()
     bus.connect ("message", bus_call, loop)
 
-    print("Starting Dual View Pipeline with Corrected Aspect Ratio...")
+    print("Starting Dual View Pipeline with 95th Percentile Stabilization (30s Window)...")
     pipeline.set_state(Gst.State.PLAYING)
     try:
         loop.run()
