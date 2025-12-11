@@ -19,10 +19,6 @@ except ImportError:
     sys.exit(1)
 
 # --- CONFIGURATION ---
-# 1. We use os.path.abspath to ensure we find the files relative to where you run the script
-CURRENT_DIR = os.getcwd()
-
-# UPDATE THESE FILENAMES IF NEEDED
 TOP_VIDEO_FILENAME = "Top_view_normal_20min_normal_lens_3_h264.mp4"
 SIDE_VIDEO_FILENAME = "Side_view_normal_20min_wide_lens_3_h264.mp4"
 
@@ -31,15 +27,16 @@ SIDE_CONFIG = "config_infer_primary_yoloV8_side.txt"
 
 # --- FILE CHECKER ---
 def check_file(filename):
-    path = os.path.join(CURRENT_DIR, filename)
+    current_dir = os.getcwd()
+    path = os.path.join(current_dir, filename)
     if not os.path.exists(path):
         print(f"\n[ERROR] File not found: {path}")
         print("Please check the filename and ensure it is in the same folder as this script.\n")
         sys.exit(1)
     return "file://" + path
 
-# Validate files before starting GStreamer
-print(f"Checking for files in: {CURRENT_DIR}")
+# Validate files
+print(f"Checking for files in: {os.getcwd()}")
 TOP_VIDEO_URI = check_file(TOP_VIDEO_FILENAME)
 SIDE_VIDEO_URI = check_file(SIDE_VIDEO_FILENAME)
 print("[OK] Video files found.")
@@ -58,6 +55,11 @@ side_stats = {"current": 0, "stabilized": 0}
 
 stats_lock = threading.Lock()
 
+# --- NEW: GLOBAL PAD INDEX COUNTER ---
+# We use this to assign sink_0, sink_1, etc. manually
+pad_index = 0
+pad_index_lock = threading.Lock()
+
 def get_stabilized_count(buffer):
     if len(buffer) == 0:
         return 0
@@ -70,80 +72,66 @@ def top_infer_src_probe(pad, info, u_data):
     gst_buffer = info.get_buffer()
     if not gst_buffer:
         return Gst.PadProbeReturn.OK
-
     batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
     l_frame = batch_meta.frame_meta_list
-
     while l_frame is not None:
         try:
             frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
         except StopIteration:
             break
-
         num_rects = frame_meta.num_obj_meta
         with stats_lock:
             top_buffer.append(num_rects)
             top_stats["current"] = num_rects
             top_stats["stabilized"] = get_stabilized_count(top_buffer)
-
         try:
             l_frame = l_frame.next
         except StopIteration:
             break
-
     return Gst.PadProbeReturn.OK
 
 def side_infer_src_probe(pad, info, u_data):
     gst_buffer = info.get_buffer()
     if not gst_buffer:
         return Gst.PadProbeReturn.OK
-
     batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
     l_frame = batch_meta.frame_meta_list
-
     while l_frame is not None:
         try:
             frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
         except StopIteration:
             break
-
         num_rects = frame_meta.num_obj_meta
         with stats_lock:
             side_buffer.append(num_rects)
             side_stats["current"] = num_rects
             side_stats["stabilized"] = get_stabilized_count(side_buffer)
-
         try:
             l_frame = l_frame.next
         except StopIteration:
             break
-
     return Gst.PadProbeReturn.OK
 
 def osd_sink_pad_probe(pad, info, u_data):
     gst_buffer = info.get_buffer()
     if not gst_buffer:
         return Gst.PadProbeReturn.OK
-
     batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
     l_frame = batch_meta.frame_meta_list
-
     while l_frame is not None:
         try:
             frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
         except StopIteration:
             break
-
         display_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
         display_meta.num_labels = 2
-
         with stats_lock:
             t_cur = top_stats["current"]
             t_stab = top_stats["stabilized"]
             s_cur = side_stats["current"]
             s_stab = side_stats["stabilized"]
 
-        # --- LABEL 1: TOP VIEW INFO ---
+        # LABEL 1: TOP
         params_top = display_meta.text_params[0]
         params_top.display_text = f"TOP VIEW\nCurrent: {t_cur}\nStabilized: {t_stab}"
         params_top.x_offset = 20
@@ -154,7 +142,7 @@ def osd_sink_pad_probe(pad, info, u_data):
         params_top.set_bg_clr = 1
         params_top.text_bg_clr.set(0.0, 0.0, 0.0, 0.7)
 
-        # --- LABEL 2: SIDE VIEW INFO ---
+        # LABEL 2: SIDE
         params_side = display_meta.text_params[1]
         params_side.display_text = f"SIDE VIEW\nCurrent: {s_cur}\nStabilized: {s_stab}"
         params_side.x_offset = 980
@@ -166,26 +154,39 @@ def osd_sink_pad_probe(pad, info, u_data):
         params_side.text_bg_clr.set(0.0, 0.0, 0.0, 0.7)
 
         pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)
-
         try:
             l_frame = l_frame.next
         except StopIteration:
             break
-
     return Gst.PadProbeReturn.OK
 
+# --- FIXED CALLBACK ---
 def cb_newpad(decodebin, decoder_src_pad, data):
     caps = decoder_src_pad.get_current_caps()
     gststruct = caps.get_structure(0)
     gstname = gststruct.get_name()
     streammux = data
+
+    # Only link video streams
     if gstname.find("video") != -1:
-        sinkpad = streammux.request_pad_simple("sink_%u")
+        # We manually request sink_0, sink_1, etc.
+        # This is strictly safer than request_pad_simple("sink_%u") which can fail.
+
+        # In this specific dual-stream setup, since we have two independent pipelines feeding
+        # into two separate muxers, we actually always want "sink_0" for THAT specific muxer.
+        # Explanation: top_source connects to top_mux. top_mux ONLY has one input (sink_0).
+        # side_source connects to side_mux. side_mux ONLY has one input (sink_0).
+
+        sinkpad = streammux.request_pad_simple("sink_0")
+
         if not sinkpad:
-            sys.stderr.write("Unable to get the sink pad of streammux \n")
+            sys.stderr.write(f"Error: Unable to get sink_0 pad from {streammux.get_name()}\n")
+            return
 
         if decoder_src_pad.link(sinkpad) != Gst.PadLinkReturn.OK:
-            sys.stderr.write("Failed to link decoder to stream mux\n")
+            sys.stderr.write(f"Error: Failed to link decoder to {streammux.get_name()}\n")
+        else:
+            print(f"Success: Linked {decodebin.get_name()} to {streammux.get_name()}")
 
 def bus_call(bus, message, loop):
     t = message.type
@@ -230,10 +231,8 @@ def main():
 
     side_conv = Gst.ElementFactory.make("nvvideoconvert", "side-conv")
 
-    # --- REPLACED TILER WITH COMPOSITOR ---
-    # nvmultistreamtiler does NOT support request pads. nvcompositor DOES.
+    # --- COMPOSITOR ---
     compositor = Gst.ElementFactory.make("nvcompositor", "compositor")
-
     nvosd = Gst.ElementFactory.make("nvdsosd", "onscreendisplay")
     sink = Gst.ElementFactory.make("nveglglessink", "nvvideo-renderer")
 
@@ -258,53 +257,47 @@ def main():
     pipeline.add(nvosd)
     pipeline.add(sink)
 
-    # --- LINKING ---
+    # --- DYNAMIC LINKING ---
+    # We pass the specific MUXER as user_data to the callback.
+    # So top_source will link to top_mux, and side_source to side_mux.
     top_source.connect("pad-added", cb_newpad, top_mux)
     side_source.connect("pad-added", cb_newpad, side_mux)
 
+    # --- STATIC LINKING ---
     top_mux.link(top_infer)
     top_infer.link(top_conv)
 
     side_mux.link(side_infer)
     side_infer.link(side_conv)
 
-    # --- COMPOSITOR LINKING & CONFIGURATION ---
+    # --- COMPOSITOR LINKING ---
 
-    # 1. Top View (Left Side)
+    # 1. Top View (Left)
     t_pad = top_conv.get_static_pad("src")
-    comp_pad_0 = compositor.request_pad_simple("sink_%u") # Get valid sink pad
+    comp_pad_0 = compositor.request_pad_simple("sink_%u")
     if not comp_pad_0:
-        sys.stderr.write("Error: Could not get pad from nvcompositor\n")
+        sys.stderr.write("Error: Could not get pad 0 from nvcompositor\n")
         sys.exit(1)
 
-    # Configure Pad Properties (Layout)
     comp_pad_0.set_property("xpos", 0)
     comp_pad_0.set_property("ypos", 0)
-    comp_pad_0.set_property("width", 960) # Half width
+    comp_pad_0.set_property("width", 960)
     comp_pad_0.set_property("height", 1080)
+    t_pad.link(comp_pad_0)
 
-    if t_pad.link(comp_pad_0) != Gst.PadLinkReturn.OK:
-        sys.stderr.write("Error: Failed to link top_conv to compositor\n")
-        sys.exit(1)
-
-    # 2. Side View (Right Side)
+    # 2. Side View (Right)
     s_pad = side_conv.get_static_pad("src")
     comp_pad_1 = compositor.request_pad_simple("sink_%u")
     if not comp_pad_1:
-        sys.stderr.write("Error: Could not get pad from nvcompositor\n")
+        sys.stderr.write("Error: Could not get pad 1 from nvcompositor\n")
         sys.exit(1)
 
-    # Configure Pad Properties (Layout)
-    comp_pad_1.set_property("xpos", 960) # Start at middle
+    comp_pad_1.set_property("xpos", 960)
     comp_pad_1.set_property("ypos", 0)
     comp_pad_1.set_property("width", 960)
     comp_pad_1.set_property("height", 1080)
+    s_pad.link(comp_pad_1)
 
-    if s_pad.link(comp_pad_1) != Gst.PadLinkReturn.OK:
-        sys.stderr.write("Error: Failed to link side_conv to compositor\n")
-        sys.exit(1)
-
-    # Output Chain
     compositor.link(nvosd)
     nvosd.link(sink)
 
