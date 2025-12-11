@@ -22,6 +22,7 @@ except ImportError:
 TOP_VIDEO_FILENAME = "Top_view_normal_20min_normal_lens_3_h264.mp4"
 SIDE_VIDEO_FILENAME = "Side_view_normal_20min_wide_lens_3_h264.mp4"
 
+# Ensure these config files exist or point to valid YOLO configs
 TOP_CONFIG = "config_infer_primary_yoloV8.txt"
 SIDE_CONFIG = "config_infer_primary_yoloV8_side.txt"
 
@@ -55,11 +56,6 @@ side_stats = {"current": 0, "stabilized": 0}
 
 stats_lock = threading.Lock()
 
-# --- NEW: GLOBAL PAD INDEX COUNTER ---
-# We use this to assign sink_0, sink_1, etc. manually
-pad_index = 0
-pad_index_lock = threading.Lock()
-
 def get_stabilized_count(buffer):
     if len(buffer) == 0:
         return 0
@@ -72,117 +68,106 @@ def top_infer_src_probe(pad, info, u_data):
     gst_buffer = info.get_buffer()
     if not gst_buffer:
         return Gst.PadProbeReturn.OK
+
     batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
     l_frame = batch_meta.frame_meta_list
+
     while l_frame is not None:
         try:
             frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
         except StopIteration:
             break
+
+        # 1. Update Stats
         num_rects = frame_meta.num_obj_meta
         with stats_lock:
             top_buffer.append(num_rects)
             top_stats["current"] = num_rects
             top_stats["stabilized"] = get_stabilized_count(top_buffer)
+            cur = top_stats["current"]
+            stab = top_stats["stabilized"]
+
+        # 2. Draw Text Immediately (Before Compositor)
+        display_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
+        display_meta.num_labels = 1
+
+        params = display_meta.text_params[0]
+        params.display_text = f"TOP VIEW\nCurrent: {cur}\nStabilized: {stab}"
+        params.x_offset = 20
+        params.y_offset = 20
+        params.font_params.font_name = "Serif"
+        params.font_params.font_size = 20
+        params.font_params.font_color.set(1.0, 1.0, 1.0, 1.0)
+        params.set_bg_clr = 1
+        params.text_bg_clr.set(0.0, 0.0, 0.0, 0.7)
+
+        pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)
+
         try:
             l_frame = l_frame.next
         except StopIteration:
             break
+
     return Gst.PadProbeReturn.OK
 
 def side_infer_src_probe(pad, info, u_data):
     gst_buffer = info.get_buffer()
     if not gst_buffer:
         return Gst.PadProbeReturn.OK
+
     batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
     l_frame = batch_meta.frame_meta_list
+
     while l_frame is not None:
         try:
             frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
         except StopIteration:
             break
+
+        # 1. Update Stats
         num_rects = frame_meta.num_obj_meta
         with stats_lock:
             side_buffer.append(num_rects)
             side_stats["current"] = num_rects
             side_stats["stabilized"] = get_stabilized_count(side_buffer)
-        try:
-            l_frame = l_frame.next
-        except StopIteration:
-            break
-    return Gst.PadProbeReturn.OK
+            cur = side_stats["current"]
+            stab = side_stats["stabilized"]
 
-def osd_sink_pad_probe(pad, info, u_data):
-    gst_buffer = info.get_buffer()
-    if not gst_buffer:
-        return Gst.PadProbeReturn.OK
-    batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
-    l_frame = batch_meta.frame_meta_list
-    while l_frame is not None:
-        try:
-            frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
-        except StopIteration:
-            break
+        # 2. Draw Text Immediately (Before Compositor)
         display_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
-        display_meta.num_labels = 2
-        with stats_lock:
-            t_cur = top_stats["current"]
-            t_stab = top_stats["stabilized"]
-            s_cur = side_stats["current"]
-            s_stab = side_stats["stabilized"]
+        display_meta.num_labels = 1
 
-        # LABEL 1: TOP
-        params_top = display_meta.text_params[0]
-        params_top.display_text = f"TOP VIEW\nCurrent: {t_cur}\nStabilized: {t_stab}"
-        params_top.x_offset = 20
-        params_top.y_offset = 20
-        params_top.font_params.font_name = "Serif"
-        params_top.font_params.font_size = 20
-        params_top.font_params.font_color.set(1.0, 1.0, 1.0, 1.0)
-        params_top.set_bg_clr = 1
-        params_top.text_bg_clr.set(0.0, 0.0, 0.0, 0.7)
-
-        # LABEL 2: SIDE
-        params_side = display_meta.text_params[1]
-        params_side.display_text = f"SIDE VIEW\nCurrent: {s_cur}\nStabilized: {s_stab}"
-        params_side.x_offset = 980
-        params_side.y_offset = 20
-        params_side.font_params.font_name = "Serif"
-        params_side.font_params.font_size = 20
-        params_side.font_params.font_color.set(1.0, 1.0, 1.0, 1.0)
-        params_side.set_bg_clr = 1
-        params_side.text_bg_clr.set(0.0, 0.0, 0.0, 0.7)
+        params = display_meta.text_params[0]
+        params.display_text = f"SIDE VIEW\nCurrent: {cur}\nStabilized: {stab}"
+        params.x_offset = 20
+        params.y_offset = 20
+        params.font_params.font_name = "Serif"
+        params.font_params.font_size = 20
+        params.font_params.font_color.set(1.0, 1.0, 1.0, 1.0)
+        params.set_bg_clr = 1
+        params.text_bg_clr.set(0.0, 0.0, 0.0, 0.7)
 
         pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)
+
         try:
             l_frame = l_frame.next
         except StopIteration:
             break
+
     return Gst.PadProbeReturn.OK
 
-# --- FIXED CALLBACK ---
+# --- CALLBACK ---
 def cb_newpad(decodebin, decoder_src_pad, data):
     caps = decoder_src_pad.get_current_caps()
     gststruct = caps.get_structure(0)
     gstname = gststruct.get_name()
     streammux = data
 
-    # Only link video streams
     if gstname.find("video") != -1:
-        # We manually request sink_0, sink_1, etc.
-        # This is strictly safer than request_pad_simple("sink_%u") which can fail.
-
-        # In this specific dual-stream setup, since we have two independent pipelines feeding
-        # into two separate muxers, we actually always want "sink_0" for THAT specific muxer.
-        # Explanation: top_source connects to top_mux. top_mux ONLY has one input (sink_0).
-        # side_source connects to side_mux. side_mux ONLY has one input (sink_0).
-
         sinkpad = streammux.request_pad_simple("sink_0")
-
         if not sinkpad:
             sys.stderr.write(f"Error: Unable to get sink_0 pad from {streammux.get_name()}\n")
             return
-
         if decoder_src_pad.link(sinkpad) != Gst.PadLinkReturn.OK:
             sys.stderr.write(f"Error: Failed to link decoder to {streammux.get_name()}\n")
         else:
@@ -203,7 +188,9 @@ def main():
     Gst.init(None)
     pipeline = Gst.Pipeline()
 
-    # --- TOP VIEW BRANCH ---
+    # ==========================
+    # 1. TOP VIEW BRANCH
+    # ==========================
     top_source = Gst.ElementFactory.make("uridecodebin", "top-source")
     top_source.set_property("uri", TOP_VIDEO_URI)
 
@@ -216,8 +203,14 @@ def main():
     top_infer.set_property('config-file-path', TOP_CONFIG)
 
     top_conv = Gst.ElementFactory.make("nvvideoconvert", "top-conv")
+    # nvdsosd requires RGBA, so we ensure the convert produces it
 
-    # --- SIDE VIEW BRANCH ---
+    top_osd = Gst.ElementFactory.make("nvdsosd", "top-osd")
+    top_osd.set_property('display-clock', 0) # disable clock to just show our text
+
+    # ==========================
+    # 2. SIDE VIEW BRANCH
+    # ==========================
     side_source = Gst.ElementFactory.make("uridecodebin", "side-source")
     side_source.set_property("uri", SIDE_VIDEO_URI)
 
@@ -231,85 +224,77 @@ def main():
 
     side_conv = Gst.ElementFactory.make("nvvideoconvert", "side-conv")
 
-    # --- COMPOSITOR ---
-    compositor = Gst.ElementFactory.make("nvcompositor", "compositor")
-    nvosd = Gst.ElementFactory.make("nvdsosd", "onscreendisplay")
-    sink = Gst.ElementFactory.make("nveglglessink", "nvvideo-renderer")
+    side_osd = Gst.ElementFactory.make("nvdsosd", "side-osd")
+    side_osd.set_property('display-clock', 0)
 
-    if not all([top_source, top_mux, top_infer, top_conv,
-                side_source, side_mux, side_infer, side_conv,
-                compositor, nvosd, sink]):
+    # ==========================
+    # 3. COMPOSITION
+    # ==========================
+    compositor = Gst.ElementFactory.make("nvcompositor", "compositor")
+    # We do NOT need a master nvosd after compositor because metadata is gone.
+    # We just sink the pixel data.
+
+    sink = Gst.ElementFactory.make("nveglglessink", "nvvideo-renderer")
+    sink.set_property("sync", 0) # Optional: disable sync to run as fast as possible or real-time
+
+    # Validate Elements
+    if not all([top_source, top_mux, top_infer, top_conv, top_osd,
+                side_source, side_mux, side_infer, side_conv, side_osd,
+                compositor, sink]):
         sys.stderr.write("Elements could not be created\n")
         sys.exit(1)
 
-    # --- ADD ELEMENTS ---
-    pipeline.add(top_source)
-    pipeline.add(top_mux)
-    pipeline.add(top_infer)
-    pipeline.add(top_conv)
-
-    pipeline.add(side_source)
-    pipeline.add(side_mux)
-    pipeline.add(side_infer)
-    pipeline.add(side_conv)
-
-    pipeline.add(compositor)
-    pipeline.add(nvosd)
-    pipeline.add(sink)
+    # Add Elements
+    for elem in [top_source, top_mux, top_infer, top_conv, top_osd,
+                 side_source, side_mux, side_infer, side_conv, side_osd,
+                 compositor, sink]:
+        pipeline.add(elem)
 
     # --- DYNAMIC LINKING ---
-    # We pass the specific MUXER as user_data to the callback.
-    # So top_source will link to top_mux, and side_source to side_mux.
     top_source.connect("pad-added", cb_newpad, top_mux)
     side_source.connect("pad-added", cb_newpad, side_mux)
 
-    # --- STATIC LINKING ---
+    # --- STATIC LINKING (TOP) ---
     top_mux.link(top_infer)
     top_infer.link(top_conv)
+    top_conv.link(top_osd)
 
+    # --- STATIC LINKING (SIDE) ---
     side_mux.link(side_infer)
     side_infer.link(side_conv)
+    side_conv.link(side_osd)
 
     # --- COMPOSITOR LINKING ---
-
-    # 1. Top View (Left)
-    t_pad = top_conv.get_static_pad("src")
+    # Top Branch -> Compositor Sink 0
+    t_pad = top_osd.get_static_pad("src")
     comp_pad_0 = compositor.request_pad_simple("sink_%u")
-    if not comp_pad_0:
-        sys.stderr.write("Error: Could not get pad 0 from nvcompositor\n")
-        sys.exit(1)
-
     comp_pad_0.set_property("xpos", 0)
     comp_pad_0.set_property("ypos", 0)
     comp_pad_0.set_property("width", 960)
     comp_pad_0.set_property("height", 1080)
     t_pad.link(comp_pad_0)
 
-    # 2. Side View (Right)
-    s_pad = side_conv.get_static_pad("src")
+    # Side Branch -> Compositor Sink 1
+    s_pad = side_osd.get_static_pad("src")
     comp_pad_1 = compositor.request_pad_simple("sink_%u")
-    if not comp_pad_1:
-        sys.stderr.write("Error: Could not get pad 1 from nvcompositor\n")
-        sys.exit(1)
-
     comp_pad_1.set_property("xpos", 960)
     comp_pad_1.set_property("ypos", 0)
     comp_pad_1.set_property("width", 960)
     comp_pad_1.set_property("height", 1080)
     s_pad.link(comp_pad_1)
 
-    compositor.link(nvosd)
-    nvosd.link(sink)
+    # Compositor -> Sink
+    compositor.link(sink)
 
-    # --- PROBES ---
-    top_infer_src = top_infer.get_static_pad("src")
-    top_infer_src.add_probe(Gst.PadProbeType.BUFFER, top_infer_src_probe, 0)
+    # --- ATTACH PROBES ---
+    # We attach probes to the OSD sink pads (before drawing happens)
+    # This allows us to modify metadata (add text) before the OSD element renders it.
 
-    side_infer_src = side_infer.get_static_pad("src")
-    side_infer_src.add_probe(Gst.PadProbeType.BUFFER, side_infer_src_probe, 0)
+    top_osd_sink = top_osd.get_static_pad("sink")
+    top_osd_sink.add_probe(Gst.PadProbeType.BUFFER, top_infer_src_probe, 0)
 
-    osd_sink = nvosd.get_static_pad("sink")
-    osd_sink.add_probe(Gst.PadProbeType.BUFFER, osd_sink_pad_probe, 0)
+    side_osd_sink = side_osd.get_static_pad("sink")
+    side_osd_sink.add_probe(Gst.PadProbeType.BUFFER, side_infer_src_probe, 0)
 
     # --- RUN ---
     loop = GLib.MainLoop()
