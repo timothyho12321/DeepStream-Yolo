@@ -257,23 +257,27 @@ def main():
     side_mux.link(side_infer)
     side_infer.link(side_conv)
 
-    # --- TILER LINKING (FIXED) ---
+    # --- TILER LINKING ---
 
-    # 1. Request pad for TOP view (Will get sink_0)
+    # 1. Link TOP view to sink_0
     t_pad = top_conv.get_static_pad("src")
-    tile_pad_0 = compositor.request_pad_simple("sink_%u") # <--- FIXED HERE
+    tile_pad_0 = compositor.get_request_pad("sink_0")
     if not tile_pad_0:
         sys.stderr.write("Error: Could not get sink_0 from compositor\n")
         sys.exit(1)
-    t_pad.link(tile_pad_0)
+    if t_pad.link(tile_pad_0) != Gst.PadLinkReturn.OK:
+        sys.stderr.write("Error: Failed to link top_conv to compositor sink_0\n")
+        sys.exit(1)
 
-    # 2. Request pad for SIDE view (Will get sink_1)
+    # 2. Link SIDE view to sink_1
     s_pad = side_conv.get_static_pad("src")
-    tile_pad_1 = compositor.request_pad_simple("sink_%u") # <--- FIXED HERE
+    tile_pad_1 = compositor.get_request_pad("sink_1")
     if not tile_pad_1:
         sys.stderr.write("Error: Could not get sink_1 from compositor\n")
         sys.exit(1)
-    s_pad.link(tile_pad_1)
+    if s_pad.link(tile_pad_1) != Gst.PadLinkReturn.OK:
+        sys.stderr.write("Error: Failed to link side_conv to compositor sink_1\n")
+        sys.exit(1)
 
     # Output Chain
     compositor.link(nvosd)
