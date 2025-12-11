@@ -19,11 +19,30 @@ except ImportError:
     sys.exit(1)
 
 # --- CONFIGURATION ---
-TOP_VIDEO_URI = "file:///home/flotech/DeepStream-Yolo/Top_view_normal_20min_wide_lens_3_h264.mp4"
-SIDE_VIDEO_URI = "file:///home/flotech/DeepStream-Yolo/Side_view_normal_20min_wide_lens_3_h264.mp4"
+# 1. We use os.path.abspath to ensure we find the files relative to where you run the script
+CURRENT_DIR = os.getcwd()
+
+# UPDATE THESE FILENAMES IF NEEDED
+TOP_VIDEO_FILENAME = "Top_view_normal_20min_normal_lens_3_h264.mp4"
+SIDE_VIDEO_FILENAME = "Side_view_normal_20min_wide_lens_3_h264.mp4"
 
 TOP_CONFIG = "config_infer_primary_yoloV8.txt"
 SIDE_CONFIG = "config_infer_primary_yoloV8_side.txt"
+
+# --- FILE CHECKER ---
+def check_file(filename):
+    path = os.path.join(CURRENT_DIR, filename)
+    if not os.path.exists(path):
+        print(f"\n[ERROR] File not found: {path}")
+        print("Please check the filename and ensure it is in the same folder as this script.\n")
+        sys.exit(1)
+    return "file://" + path
+
+# Validate files before starting GStreamer
+print(f"Checking for files in: {CURRENT_DIR}")
+TOP_VIDEO_URI = check_file(TOP_VIDEO_FILENAME)
+SIDE_VIDEO_URI = check_file(SIDE_VIDEO_FILENAME)
+print("[OK] Video files found.")
 
 # Stabilization Settings
 FPS = 30
@@ -62,7 +81,6 @@ def top_infer_src_probe(pad, info, u_data):
             break
 
         num_rects = frame_meta.num_obj_meta
-
         with stats_lock:
             top_buffer.append(num_rects)
             top_stats["current"] = num_rects
@@ -90,7 +108,6 @@ def side_infer_src_probe(pad, info, u_data):
             break
 
         num_rects = frame_meta.num_obj_meta
-
         with stats_lock:
             side_buffer.append(num_rects)
             side_stats["current"] = num_rects
@@ -126,7 +143,7 @@ def osd_sink_pad_probe(pad, info, u_data):
             s_cur = side_stats["current"]
             s_stab = side_stats["stabilized"]
 
-        # --- LABEL 1: TOP VIEW INFO (Left Side) ---
+        # --- LABEL 1: TOP VIEW INFO ---
         params_top = display_meta.text_params[0]
         params_top.display_text = f"TOP VIEW\nCurrent: {t_cur}\nStabilized: {t_stab}"
         params_top.x_offset = 20
@@ -137,10 +154,9 @@ def osd_sink_pad_probe(pad, info, u_data):
         params_top.set_bg_clr = 1
         params_top.text_bg_clr.set(0.0, 0.0, 0.0, 0.7)
 
-        # --- LABEL 2: SIDE VIEW INFO (Right Side) ---
+        # --- LABEL 2: SIDE VIEW INFO ---
         params_side = display_meta.text_params[1]
         params_side.display_text = f"SIDE VIEW\nCurrent: {s_cur}\nStabilized: {s_stab}"
-        # Position this on the right side of the screen (960 is center)
         params_side.x_offset = 980
         params_side.y_offset = 20
         params_side.font_params.font_name = "Serif"
@@ -164,7 +180,6 @@ def cb_newpad(decodebin, decoder_src_pad, data):
     gstname = gststruct.get_name()
     streammux = data
     if gstname.find("video") != -1:
-        # Request the next available pad from streammux
         sinkpad = streammux.request_pad_simple("sink_%u")
         if not sinkpad:
             sys.stderr.write("Unable to get the sink pad of streammux \n")
@@ -215,13 +230,9 @@ def main():
 
     side_conv = Gst.ElementFactory.make("nvvideoconvert", "side-conv")
 
-    # --- COMPOSITION & OUTPUT ---
-    compositor = Gst.ElementFactory.make("nvmultistreamtiler", "compositor")
-    # Set to 1 Row, 2 Columns for Side-by-Side view
-    compositor.set_property('rows', 1)
-    compositor.set_property('columns', 2)
-    compositor.set_property('width', 1920)
-    compositor.set_property('height', 1080)
+    # --- REPLACED TILER WITH COMPOSITOR ---
+    # nvmultistreamtiler does NOT support request pads. nvcompositor DOES.
+    compositor = Gst.ElementFactory.make("nvcompositor", "compositor")
 
     nvosd = Gst.ElementFactory.make("nvdsosd", "onscreendisplay")
     sink = Gst.ElementFactory.make("nveglglessink", "nvvideo-renderer")
@@ -257,26 +268,40 @@ def main():
     side_mux.link(side_infer)
     side_infer.link(side_conv)
 
-    # --- TILER LINKING ---
+    # --- COMPOSITOR LINKING & CONFIGURATION ---
 
-    # 1. Link TOP view to sink_0
+    # 1. Top View (Left Side)
     t_pad = top_conv.get_static_pad("src")
-    tile_pad_0 = compositor.get_request_pad("sink_0")
-    if not tile_pad_0:
-        sys.stderr.write("Error: Could not get sink_0 from compositor\n")
-        sys.exit(1)
-    if t_pad.link(tile_pad_0) != Gst.PadLinkReturn.OK:
-        sys.stderr.write("Error: Failed to link top_conv to compositor sink_0\n")
+    comp_pad_0 = compositor.request_pad_simple("sink_%u") # Get valid sink pad
+    if not comp_pad_0:
+        sys.stderr.write("Error: Could not get pad from nvcompositor\n")
         sys.exit(1)
 
-    # 2. Link SIDE view to sink_1
-    s_pad = side_conv.get_static_pad("src")
-    tile_pad_1 = compositor.get_request_pad("sink_1")
-    if not tile_pad_1:
-        sys.stderr.write("Error: Could not get sink_1 from compositor\n")
+    # Configure Pad Properties (Layout)
+    comp_pad_0.set_property("xpos", 0)
+    comp_pad_0.set_property("ypos", 0)
+    comp_pad_0.set_property("width", 960) # Half width
+    comp_pad_0.set_property("height", 1080)
+
+    if t_pad.link(comp_pad_0) != Gst.PadLinkReturn.OK:
+        sys.stderr.write("Error: Failed to link top_conv to compositor\n")
         sys.exit(1)
-    if s_pad.link(tile_pad_1) != Gst.PadLinkReturn.OK:
-        sys.stderr.write("Error: Failed to link side_conv to compositor sink_1\n")
+
+    # 2. Side View (Right Side)
+    s_pad = side_conv.get_static_pad("src")
+    comp_pad_1 = compositor.request_pad_simple("sink_%u")
+    if not comp_pad_1:
+        sys.stderr.write("Error: Could not get pad from nvcompositor\n")
+        sys.exit(1)
+
+    # Configure Pad Properties (Layout)
+    comp_pad_1.set_property("xpos", 960) # Start at middle
+    comp_pad_1.set_property("ypos", 0)
+    comp_pad_1.set_property("width", 960)
+    comp_pad_1.set_property("height", 1080)
+
+    if s_pad.link(comp_pad_1) != Gst.PadLinkReturn.OK:
+        sys.stderr.write("Error: Failed to link side_conv to compositor\n")
         sys.exit(1)
 
     # Output Chain
