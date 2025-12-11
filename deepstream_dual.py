@@ -265,22 +265,28 @@ def main():
     side_conv.link(side_osd)
 
     # --- COMPOSITOR LINKING ---
-    # Top Branch -> Compositor Sink 0
+    # Configure compositor to maintain aspect ratio with letterboxing
+    
+    # Top Branch -> Compositor Sink 0 (Left Half)
     t_pad = top_osd.get_static_pad("src")
     comp_pad_0 = compositor.request_pad_simple("sink_%u")
     comp_pad_0.set_property("xpos", 0)
     comp_pad_0.set_property("ypos", 0)
     comp_pad_0.set_property("width", 960)
     comp_pad_0.set_property("height", 1080)
+    # Enable aspect ratio preservation with letterboxing
+    comp_pad_0.set_property("keep-aspect-ratio", True)
     t_pad.link(comp_pad_0)
 
-    # Side Branch -> Compositor Sink 1
+    # Side Branch -> Compositor Sink 1 (Right Half)
     s_pad = side_osd.get_static_pad("src")
     comp_pad_1 = compositor.request_pad_simple("sink_%u")
     comp_pad_1.set_property("xpos", 960)
     comp_pad_1.set_property("ypos", 0)
     comp_pad_1.set_property("width", 960)
     comp_pad_1.set_property("height", 1080)
+    # Enable aspect ratio preservation with letterboxing
+    comp_pad_1.set_property("keep-aspect-ratio", True)
     s_pad.link(comp_pad_1)
 
     # Compositor -> Sink
