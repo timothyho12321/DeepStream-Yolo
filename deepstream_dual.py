@@ -8,6 +8,8 @@ import os
 from collections import deque
 from collections import Counter
 import threading
+import csv
+from datetime import datetime
 
 gi.require_version('Gst', '1.0')
 from gi.repository import GObject, Gst, GLib
@@ -41,6 +43,25 @@ print(f"Checking for files in: {os.getcwd()}")
 TOP_VIDEO_URI = check_file(TOP_VIDEO_FILENAME)
 SIDE_VIDEO_URI = check_file(SIDE_VIDEO_FILENAME)
 print("[OK] Video files found.")
+
+# CSV File Setup with timestamp
+CSV_DIR = "csv"
+os.makedirs(CSV_DIR, exist_ok=True)
+
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+TOP_CSV_FILE = os.path.join(CSV_DIR, f"top_view_counts_{timestamp}.csv")
+SIDE_CSV_FILE = os.path.join(CSV_DIR, f"side_view_counts_{timestamp}.csv")
+
+# Initialize CSV files with headers
+with open(TOP_CSV_FILE, 'w', newline='') as f:
+    writer = csv.writer(f)
+    writer.writerow(['Frame', 'Current_Count', 'Stabilized_Count'])
+
+with open(SIDE_CSV_FILE, 'w', newline='') as f:
+    writer = csv.writer(f)
+    writer.writerow(['Frame', 'Current_Count', 'Stabilized_Count'])
+
+print(f"[OK] CSV files created: {TOP_CSV_FILE}, {SIDE_CSV_FILE}")
 
 # Stabilization Settings
 FPS = 30
@@ -87,6 +108,14 @@ def top_infer_src_probe(pad, info, u_data):
             cur = top_stats["current"]
             stab = top_stats["stabilized"]
 
+        # Print to Terminal
+        print(f"[TOP] Frame={frame_meta.frame_num} | Current={cur} | Stabilized(10s)={stab}")
+
+        # Write to CSV
+        with open(TOP_CSV_FILE, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([frame_meta.frame_num, cur, stab])
+
         # 2. Draw Text Immediately (Before Compositor)
         display_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
         display_meta.num_labels = 1
@@ -132,6 +161,14 @@ def side_infer_src_probe(pad, info, u_data):
             side_stats["stabilized"] = get_stabilized_count(side_buffer)
             cur = side_stats["current"]
             stab = side_stats["stabilized"]
+
+        # Print to Terminal
+        print(f"[SIDE] Frame={frame_meta.frame_num} | Current={cur} | Stabilized(10s)={stab}")
+
+        # Write to CSV
+        with open(SIDE_CSV_FILE, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow([frame_meta.frame_num, cur, stab])
 
         # 2. Draw Text Immediately (Before Compositor)
         display_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
