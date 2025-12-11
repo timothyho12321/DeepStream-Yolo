@@ -268,11 +268,9 @@ def main():
     # 3. COMPOSITION
     # ==========================
     compositor = Gst.ElementFactory.make("nvcompositor", "compositor")
-    # We do NOT need a master nvosd after compositor because metadata is gone.
-    # We just sink the pixel data.
 
     sink = Gst.ElementFactory.make("nveglglessink", "nvvideo-renderer")
-    sink.set_property("sync", 0) # Optional: disable sync to run as fast as possible or real-time
+    sink.set_property("sync", 0)
 
     # Validate Elements
     if not all([top_source, top_mux, top_infer, top_conv, top_osd,
@@ -302,8 +300,6 @@ def main():
     side_conv.link(side_osd)
 
     # --- COMPOSITOR LINKING ---
-    # Configure compositor to maintain aspect ratio with letterboxing
-    
     # Top Branch -> Compositor Sink 0 (Left Half)
     t_pad = top_osd.get_static_pad("src")
     comp_pad_0 = compositor.request_pad_simple("sink_%u")
@@ -311,8 +307,6 @@ def main():
     comp_pad_0.set_property("ypos", 0)
     comp_pad_0.set_property("width", 960)
     comp_pad_0.set_property("height", 1080)
-    # Enable aspect ratio preservation with letterboxing
-    comp_pad_0.set_property("keep-aspect-ratio", True)
     t_pad.link(comp_pad_0)
 
     # Side Branch -> Compositor Sink 1 (Right Half)
@@ -322,17 +316,12 @@ def main():
     comp_pad_1.set_property("ypos", 0)
     comp_pad_1.set_property("width", 960)
     comp_pad_1.set_property("height", 1080)
-    # Enable aspect ratio preservation with letterboxing
-    comp_pad_1.set_property("keep-aspect-ratio", True)
     s_pad.link(comp_pad_1)
 
     # Compositor -> Sink
     compositor.link(sink)
 
     # --- ATTACH PROBES ---
-    # We attach probes to the OSD sink pads (before drawing happens)
-    # This allows us to modify metadata (add text) before the OSD element renders it.
-
     top_osd_sink = top_osd.get_static_pad("sink")
     top_osd_sink.add_probe(Gst.PadProbeType.BUFFER, top_infer_src_probe, 0)
 
