@@ -40,6 +40,13 @@ SIDE_SOURCE= "Hikrobot-MV-CS023-10GC-DA7235740"   # Side view GigE camera (Repla
 TOP_CONFIG = "config_infer_primary_yoloV8.txt"
 SIDE_CONFIG = "config_infer_primary_yoloV8_side.txt"
 
+# --- CAMERA SETTINGS (for GigE cameras) ---
+CAMERA_WIDTH = 1920
+CAMERA_HEIGHT = 1080
+CAMERA_FPS = 30
+CAMERA_EXPOSURE = 20000  # microseconds
+CAMERA_PIXEL_FORMAT = "BayerRG8"  # Common for Hikrobot cameras
+
 # --- VIEW SETTINGS (MANUAL ADJUSTMENT) ---
 # Width: 960
 # Height: 540 (Calculated as 960 / 1.77 to preserve aspect ratio)
@@ -227,55 +234,82 @@ def create_source_bin(source_id, bin_name):
     if not ARAVIS_AVAILABLE:
         print("[WARN] Aravis 0.8 bindings missing. Ensure 'gir1.2-aravis-0.8' is installed.")
 
-    # Create a Bin to encapsulate aravissrc -> videoconvert -> nvvideoconvert -> capsfilter
+    # Create a Bin to encapsulate aravissrc -> capsfilter -> queue -> videoconvert -> nvvideoconvert -> capsfilter
     bin_obj = Gst.Bin.new(bin_name)
     if not bin_obj:
         sys.stderr.write(" Unable to create bin \n")
         return None, False
 
     # Source: aravissrc
-    src = Gst.ElementFactory.make("aravissrc", "src")
+    src = Gst.ElementFactory.make("aravissrc", f"{bin_name}-src")
     if not src:
         sys.stderr.write(" Error: 'aravissrc' not found. Install gstreamer1.0-aravis.\n")
         return None, False
     
-    # Try to set camera-name. If it fails later, it might be because the ID is wrong.
-    # We will list available cameras in main() to help debug.
+    # Configure aravissrc properties
     src.set_property("camera-name", source_id)
+    src.set_property("exposure", float(CAMERA_EXPOSURE))
     
-    # Optional: Set exposure if needed
-    # src.set_property("exposure", 20000.0) 
+    # Try to set pixel format (not all versions support this property)
+    try:
+        src.set_property("pixel-format", CAMERA_PIXEL_FORMAT)
+    except:
+        print(f"[WARN] Could not set pixel-format on aravissrc. Using camera default.")
+    
+    print(f"[INFO] Configured {source_id}: {CAMERA_WIDTH}x{CAMERA_HEIGHT} @ {CAMERA_FPS}fps, exposure={CAMERA_EXPOSURE}us")
 
-    # Converter 1: videoconvert (Handles Bayer -> RGB if needed)
-    conv1 = Gst.ElementFactory.make("videoconvert", "conv1")
+    # Caps after aravissrc (specify what we want from camera)
+    caps1 = Gst.ElementFactory.make("capsfilter", f"{bin_name}-caps1")
+    caps1.set_property("caps", Gst.Caps.from_string(
+        f"video/x-bayer, width={CAMERA_WIDTH}, height={CAMERA_HEIGHT}, framerate={CAMERA_FPS}/1"
+    ))
+
+    # Queue for buffering
+    queue = Gst.ElementFactory.make("queue", f"{bin_name}-queue")
+    queue.set_property("max-size-buffers", 2)
+    queue.set_property("leaky", 2)  # Leak old buffers if queue is full
+    
+    # Converter 1: videoconvert (Handles Bayer -> RGB)
+    conv1 = Gst.ElementFactory.make("videoconvert", f"{bin_name}-conv1")
     
     # Converter 2: nvvideoconvert (Uploads to NVMM)
-    nvconv = Gst.ElementFactory.make("nvvideoconvert", "nvconv")
+    nvconv = Gst.ElementFactory.make("nvvideoconvert", f"{bin_name}-nvconv")
     
-    # Caps: Ensure NV12 for DeepStream
-    caps = Gst.ElementFactory.make("capsfilter", "caps")
-    caps.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12"))
+    # Final Caps: Ensure NV12 in NVMM for DeepStream
+    caps2 = Gst.ElementFactory.make("capsfilter", f"{bin_name}-caps2")
+    caps2.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12"))
 
     # Add elements to bin
-    Gst.Bin.add(bin_obj, src)
-    Gst.Bin.add(bin_obj, conv1)
-    Gst.Bin.add(bin_obj, nvconv)
-    Gst.Bin.add(bin_obj, caps)
+    for elem in [src, caps1, queue, conv1, nvconv, caps2]:
+        Gst.Bin.add(bin_obj, elem)
 
     # Link elements
-    if not src.link(conv1):
-        sys.stderr.write(" Failed to link aravissrc -> videoconvert\n")
+    if not src.link(caps1):
+        sys.stderr.write(" Failed to link aravissrc -> caps1\n")
+        return None, False
+    if not caps1.link(queue):
+        sys.stderr.write(" Failed to link caps1 -> queue\n")
+        return None, False
+    if not queue.link(conv1):
+        sys.stderr.write(" Failed to link queue -> videoconvert\n")
         return None, False
     if not conv1.link(nvconv):
         sys.stderr.write(" Failed to link videoconvert -> nvvideoconvert\n")
         return None, False
-    if not nvconv.link(caps):
-        sys.stderr.write(" Failed to link nvvideoconvert -> capsfilter\n")
+    if not nvconv.link(caps2):
+        sys.stderr.write(" Failed to link nvvideoconvert -> caps2\n")
         return None, False
 
     # Create Ghost Pad
-    pad = caps.get_static_pad("src")
+    pad = caps2.get_static_pad("src")
+    if not pad:
+        sys.stderr.write(" Failed to get src pad from caps2\n")
+        return None, False
     ghost_pad = Gst.GhostPad.new("src", pad)
+    if not ghost_pad:
+        sys.stderr.write(" Failed to create ghost pad\n")
+        return None, False
+    ghost_pad.set_active(True)
     bin_obj.add_pad(ghost_pad)
 
     return bin_obj, False
@@ -437,7 +471,11 @@ def main():
     comp_pad_0.set_property("ypos", 0)
     comp_pad_0.set_property("width", VIEW_WIDTH)
     comp_pad_0.set_property("height", VIEW_HEIGHT)
-    t_pad.link(comp_pad_0)
+    comp_pad_0.set_property("alpha", 1.0)
+    comp_pad_0.set_property("zorder", 0)
+    if t_pad.link(comp_pad_0) != Gst.PadLinkReturn.OK:
+        sys.stderr.write("Failed to link top OSD to compositor\n")
+        sys.exit(1)
 
     # 2. Side View (Right)
     s_pad = side_osd.get_static_pad("src")
@@ -446,7 +484,11 @@ def main():
     comp_pad_1.set_property("ypos", 0)
     comp_pad_1.set_property("width", VIEW_WIDTH)
     comp_pad_1.set_property("height", VIEW_HEIGHT)
-    s_pad.link(comp_pad_1)
+    comp_pad_1.set_property("alpha", 1.0)
+    comp_pad_1.set_property("zorder", 1)
+    if s_pad.link(comp_pad_1) != Gst.PadLinkReturn.OK:
+        sys.stderr.write("Failed to link side OSD to compositor\n")
+        sys.exit(1)
 
     compositor.link(sink)
 
