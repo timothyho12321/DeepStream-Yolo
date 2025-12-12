@@ -14,6 +14,16 @@ from datetime import datetime
 gi.require_version('Gst', '1.0')
 from gi.repository import GObject, Gst, GLib
 
+# --- ARAVIS 0.8 CHECK ---
+try:
+    gi.require_version('Aravis', '0.8')
+    from gi.repository import Aravis
+    ARAVIS_AVAILABLE = True
+    print("[INFO] Aravis 0.8 library loaded.")
+except (ImportError, ValueError):
+    print("[WARN] Aravis 0.8 not found. GigE camera support may be limited.")
+    ARAVIS_AVAILABLE = False
+
 try:
     import pyds
 except ImportError:
@@ -21,8 +31,9 @@ except ImportError:
     sys.exit(1)
 
 # --- CONFIGURATION ---
-TOP_VIDEO_FILENAME = "Top_view_normal_20min_normal_lens_3_h264.mp4"
-SIDE_VIDEO_FILENAME = "Side_view_normal_20min_wide_lens_3_h264.mp4"
+# Can be a local file path, an RTSP URL (rtsp://...), or a Camera ID (e.g. Hikrobot-...)
+TOP_SOURCE = "Top_view_normal_20min_normal_lens_3_h264.mp4"
+SIDE_SOURCE = "Side_view_normal_20min_wide_lens_3_h264.mp4"
 
 TOP_CONFIG = "config_infer_primary_yoloV8.txt"
 SIDE_CONFIG = "config_infer_primary_yoloV8_side.txt"
@@ -32,21 +43,6 @@ SIDE_CONFIG = "config_infer_primary_yoloV8_side.txt"
 # Height: 540 (Calculated as 960 / 1.77 to preserve aspect ratio)
 VIEW_WIDTH = 960
 VIEW_HEIGHT = 540
-
-# --- FILE CHECKER ---
-def check_file(filename):
-    current_dir = os.getcwd()
-    path = os.path.join(current_dir, filename)
-    if not os.path.exists(path):
-        print(f"\n[ERROR] File not found: {path}")
-        print("Please check the filename and ensure it is in the same folder as this script.\n")
-        sys.exit(1)
-    return "file://" + path
-
-print(f"Checking for files in: {os.getcwd()}")
-TOP_VIDEO_URI = check_file(TOP_VIDEO_FILENAME)
-SIDE_VIDEO_URI = check_file(SIDE_VIDEO_FILENAME)
-print("[OK] Video files found.")
 
 # CSV File Setup
 CSV_DIR = "csv"
@@ -196,6 +192,87 @@ def side_infer_src_probe(pad, info, u_data):
 
     return Gst.PadProbeReturn.OK
 
+# --- SOURCE CREATION HELPER ---
+def create_source_bin(source_id, bin_name):
+    """
+    Creates a source bin based on the source_id.
+    Supports:
+    1. RTSP/HTTP URIs (via uridecodebin)
+    2. Local Files (via uridecodebin)
+    3. Camera IDs (via aravissrc for GigE, or v4l2src fallback)
+    
+    Returns: (GstElement, needs_pad_callback)
+    """
+    # 1. Check for URI (RTSP/HTTP)
+    if "://" in source_id:
+        print(f"[INFO] Creating URI source for: {source_id}")
+        source = Gst.ElementFactory.make("uridecodebin", bin_name)
+        source.set_property("uri", source_id)
+        return source, True
+
+    # 2. Check for Local File
+    if os.path.exists(source_id):
+        abs_path = os.path.abspath(source_id)
+        uri = "file://" + abs_path
+        print(f"[INFO] Creating File source for: {uri}")
+        source = Gst.ElementFactory.make("uridecodebin", bin_name)
+        source.set_property("uri", uri)
+        return source, True
+
+    # 3. Assume Camera ID (GigE/Aravis)
+    print(f"[INFO] Source '{source_id}' not a file/URI. Attempting 'aravissrc' (GigE)...")
+    
+    if not ARAVIS_AVAILABLE:
+        print("[WARN] Aravis 0.8 bindings missing. Ensure 'gir1.2-aravis-0.8' is installed.")
+
+    # Create a Bin to encapsulate aravissrc -> videoconvert -> nvvideoconvert -> capsfilter
+    bin_obj = Gst.Bin.new(bin_name)
+    if not bin_obj:
+        sys.stderr.write(" Unable to create bin \n")
+        return None, False
+
+    # Source: aravissrc
+    src = Gst.ElementFactory.make("aravissrc", "src")
+    if not src:
+        sys.stderr.write(" Error: 'aravissrc' not found. Install gstreamer1.0-aravis.\n")
+        return None, False
+    src.set_property("camera-name", source_id)
+    # Optional: Set exposure if needed
+    # src.set_property("exposure", 20000.0) 
+
+    # Converter 1: videoconvert (Handles Bayer -> RGB if needed)
+    conv1 = Gst.ElementFactory.make("videoconvert", "conv1")
+    
+    # Converter 2: nvvideoconvert (Uploads to NVMM)
+    nvconv = Gst.ElementFactory.make("nvvideoconvert", "nvconv")
+    
+    # Caps: Ensure NV12 for DeepStream
+    caps = Gst.ElementFactory.make("capsfilter", "caps")
+    caps.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12"))
+
+    Gst.Bin.add(bin_obj, src)
+    Gst.Bin.add(bin_obj, conv1)
+    Gst.Bin.add(bin_obj, nvconv)
+    Gst.Bin.add(bin_obj, caps)
+
+    # Link elements
+    if not src.link(conv1):
+        sys.stderr.write(" Failed to link aravissrc -> videoconvert\n")
+        return None, False
+    if not conv1.link(nvconv):
+        sys.stderr.write(" Failed to link videoconvert -> nvvideoconvert\n")
+        return None, False
+    if not nvconv.link(caps):
+        sys.stderr.write(" Failed to link nvvideoconvert -> capsfilter\n")
+        return None, False
+
+    # Create Ghost Pad
+    pad = caps.get_static_pad("src")
+    ghost_pad = Gst.GhostPad.new("src", pad)
+    bin_obj.add_pad(ghost_pad)
+
+    return bin_obj, False
+
 # --- CALLBACK ---
 def cb_newpad(decodebin, decoder_src_pad, data):
     caps = decoder_src_pad.get_current_caps()
@@ -229,8 +306,11 @@ def main():
     pipeline = Gst.Pipeline()
 
     # --- TOP BRANCH ---
-    top_source = Gst.ElementFactory.make("uridecodebin", "top-source")
-    top_source.set_property("uri", TOP_VIDEO_URI)
+    top_source, top_needs_cb = create_source_bin(TOP_SOURCE, "top-source")
+    if not top_source:
+        sys.stderr.write("Failed to create top source\n")
+        sys.exit(1)
+
     top_mux = Gst.ElementFactory.make("nvstreammux", "top-mux")
     top_mux.set_property('width', 1920)
     top_mux.set_property('height', 1080)
@@ -242,8 +322,11 @@ def main():
     top_osd.set_property('display-clock', 0)
 
     # --- SIDE BRANCH ---
-    side_source = Gst.ElementFactory.make("uridecodebin", "side-source")
-    side_source.set_property("uri", SIDE_VIDEO_URI)
+    side_source, side_needs_cb = create_source_bin(SIDE_SOURCE, "side-source")
+    if not side_source:
+        sys.stderr.write("Failed to create side source\n")
+        sys.exit(1)
+
     side_mux = Gst.ElementFactory.make("nvstreammux", "side-mux")
     side_mux.set_property('width', 1920)
     side_mux.set_property('height', 1080)
@@ -270,8 +353,26 @@ def main():
                  compositor, sink]:
         pipeline.add(elem)
 
-    top_source.connect("pad-added", cb_newpad, top_mux)
-    side_source.connect("pad-added", cb_newpad, side_mux)
+    # --- LINKING SOURCES ---
+    # Top Source Linking
+    if top_needs_cb:
+        top_source.connect("pad-added", cb_newpad, top_mux)
+    else:
+        sinkpad = top_mux.request_pad_simple("sink_0")
+        srcpad = top_source.get_static_pad("src")
+        if not srcpad.link(sinkpad) == Gst.PadLinkReturn.OK:
+             sys.stderr.write("Failed to link top source to mux\n")
+             sys.exit(1)
+
+    # Side Source Linking
+    if side_needs_cb:
+        side_source.connect("pad-added", cb_newpad, side_mux)
+    else:
+        sinkpad = side_mux.request_pad_simple("sink_0")
+        srcpad = side_source.get_static_pad("src")
+        if not srcpad.link(sinkpad) == Gst.PadLinkReturn.OK:
+             sys.stderr.write("Failed to link side source to mux\n")
+             sys.exit(1)
 
     top_mux.link(top_infer)
     top_infer.link(top_conv)
