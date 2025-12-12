@@ -230,84 +230,80 @@ def create_source_bin(source_id, bin_name):
 
     # 3. Assume Camera ID (GigE/Aravis)
     print(f"[INFO] Source '{source_id}' not a file/URI. Attempting 'aravissrc' (GigE)...")
+    print(f"[INFO] Note: Aravis USB warnings for GigE cameras are normal and can be ignored.")
     
     if not ARAVIS_AVAILABLE:
         print("[WARN] Aravis 0.8 bindings missing. Ensure 'gir1.2-aravis-0.8' is installed.")
 
-    # Create a Bin to encapsulate aravissrc -> capsfilter -> queue -> videoconvert -> nvvideoconvert -> capsfilter
+    # Create a Bin: aravissrc -> queue -> videoconvert -> nvvideoconvert -> capsfilter
     bin_obj = Gst.Bin.new(bin_name)
     if not bin_obj:
         sys.stderr.write(" Unable to create bin \n")
         return None, False
 
-    # Source: aravissrc
+    # Source: aravissrc (SIMPLIFIED - let aravissrc auto-configure the camera)
     src = Gst.ElementFactory.make("aravissrc", f"{bin_name}-src")
     if not src:
         sys.stderr.write(" Error: 'aravissrc' not found. Install gstreamer1.0-aravis.\n")
         return None, False
     
-    # Configure aravissrc properties
+    # Only set camera name - let aravissrc handle the rest
     src.set_property("camera-name", source_id)
-    src.set_property("exposure", float(CAMERA_EXPOSURE))
     
-    # Try to set pixel format (not all versions support this property)
+    # Optional: Set basic properties if supported
     try:
-        src.set_property("pixel-format", CAMERA_PIXEL_FORMAT)
+        src.set_property("exposure-auto", 1)  # Auto exposure mode
     except:
-        print(f"[WARN] Could not set pixel-format on aravissrc. Using camera default.")
+        pass
     
-    print(f"[INFO] Configured {source_id}: {CAMERA_WIDTH}x{CAMERA_HEIGHT} @ {CAMERA_FPS}fps, exposure={CAMERA_EXPOSURE}us")
+    try:
+        src.set_property("gain-auto", 1)  # Auto gain mode
+    except:
+        pass
+    
+    print(f"[INFO] Configured aravissrc for: {source_id}")
 
-    # Caps after aravissrc (specify what we want from camera)
-    caps1 = Gst.ElementFactory.make("capsfilter", f"{bin_name}-caps1")
-    caps1.set_property("caps", Gst.Caps.from_string(
-        f"video/x-bayer, width={CAMERA_WIDTH}, height={CAMERA_HEIGHT}, framerate={CAMERA_FPS}/1"
-    ))
-
-    # Queue for buffering
+    # Queue for buffering (important for network cameras)
     queue = Gst.ElementFactory.make("queue", f"{bin_name}-queue")
-    queue.set_property("max-size-buffers", 2)
-    queue.set_property("leaky", 2)  # Leak old buffers if queue is full
+    queue.set_property("max-size-buffers", 3)
+    queue.set_property("leaky", 2)  # Drop old frames if queue is full
     
-    # Converter 1: videoconvert (Handles Bayer -> RGB)
+    # Converter 1: videoconvert (Handles any format -> RGB)
     conv1 = Gst.ElementFactory.make("videoconvert", f"{bin_name}-conv1")
     
-    # Converter 2: nvvideoconvert (Uploads to NVMM)
+    # Converter 2: nvvideoconvert (Uploads to NVMM for GPU processing)
     nvconv = Gst.ElementFactory.make("nvvideoconvert", f"{bin_name}-nvconv")
     
     # Final Caps: Ensure NV12 in NVMM for DeepStream
-    caps2 = Gst.ElementFactory.make("capsfilter", f"{bin_name}-caps2")
-    caps2.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12"))
+    caps = Gst.ElementFactory.make("capsfilter", f"{bin_name}-caps")
+    caps.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12"))
 
     # Add elements to bin
-    for elem in [src, caps1, queue, conv1, nvconv, caps2]:
+    for elem in [src, queue, conv1, nvconv, caps]:
         Gst.Bin.add(bin_obj, elem)
 
     # Link elements
-    if not src.link(caps1):
-        sys.stderr.write(" Failed to link aravissrc -> caps1\n")
-        return None, False
-    if not caps1.link(queue):
-        sys.stderr.write(" Failed to link caps1 -> queue\n")
+    if not src.link(queue):
+        sys.stderr.write(f" Failed to link {bin_name} aravissrc -> queue\n")
         return None, False
     if not queue.link(conv1):
-        sys.stderr.write(" Failed to link queue -> videoconvert\n")
+        sys.stderr.write(f" Failed to link {bin_name} queue -> videoconvert\n")
         return None, False
     if not conv1.link(nvconv):
-        sys.stderr.write(" Failed to link videoconvert -> nvvideoconvert\n")
+        sys.stderr.write(f" Failed to link {bin_name} videoconvert -> nvvideoconvert\n")
         return None, False
-    if not nvconv.link(caps2):
-        sys.stderr.write(" Failed to link nvvideoconvert -> caps2\n")
+    if not nvconv.link(caps):
+        sys.stderr.write(f" Failed to link {bin_name} nvvideoconvert -> caps\n")
         return None, False
 
     # Create Ghost Pad
-    pad = caps2.get_static_pad("src")
+    pad = caps.get_static_pad("src")
     if not pad:
-        sys.stderr.write(" Failed to get src pad from caps2\n")
+        sys.stderr.write(f" Failed to get src pad from {bin_name} caps\n")
         return None, False
     ghost_pad = Gst.GhostPad.new("src", pad)
     if not ghost_pad:
-        sys.stderr.write(" Failed to create ghost pad\n")
+        sys.stderr.write(f" Failed to create ghost pad for {bin_name}\n")
         return None, False
     ghost_pad.set_active(True)
     bin_obj.add_pad(ghost_pad)
