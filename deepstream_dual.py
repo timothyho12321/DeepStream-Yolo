@@ -32,8 +32,10 @@ except ImportError:
 
 # --- CONFIGURATION ---
 # Can be a local file path, an RTSP URL (rtsp://...), or a Camera ID (e.g. Hikrobot-...)
-TOP_SOURCE = "Top_view_normal_20min_normal_lens_3_h264.mp4"
-SIDE_SOURCE = "Side_view_normal_20min_wide_lens_3_h264.mp4"
+# TOP_SOURCE = "Top_view_normal_20min_normal_lens_3_h264.mp4"
+# SIDE_SOURCE = "Side_view_normal_20min_wide_lens_3_h264.mp4"
+TOP_SOURCE= "Hikrobot-MV-CS023-10GC-DA7235770"  # Top view GigE camera (Replace with actual Device ID)
+SIDE_SOURCE= "Hikrobot-MV-CS023-10GC-DA7235740"   # Side view GigE camera (Replace with actual Device ID)
 
 TOP_CONFIG = "config_infer_primary_yoloV8.txt"
 SIDE_CONFIG = "config_infer_primary_yoloV8_side.txt"
