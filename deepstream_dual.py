@@ -238,7 +238,11 @@ def create_source_bin(source_id, bin_name):
     if not src:
         sys.stderr.write(" Error: 'aravissrc' not found. Install gstreamer1.0-aravis.\n")
         return None, False
+    
+    # Try to set camera-name. If it fails later, it might be because the ID is wrong.
+    # We will list available cameras in main() to help debug.
     src.set_property("camera-name", source_id)
+    
     # Optional: Set exposure if needed
     # src.set_property("exposure", 20000.0) 
 
@@ -304,8 +308,46 @@ def bus_call(bus, message, loop):
         loop.quit()
     return True
 
+def list_aravis_cameras():
+    """
+    Lists available Aravis cameras to help the user find the correct Device ID.
+    """
+    if not ARAVIS_AVAILABLE:
+        return
+
+    print("\n[INFO] Scanning for Aravis cameras...")
+    try:
+        Aravis.update_device_list()
+        n_devices = Aravis.get_n_devices()
+        
+        if n_devices == 0:
+            print("[WARN] No Aravis cameras found! Check connections and power.")
+        else:
+            print(f"[INFO] Found {n_devices} Aravis camera(s):")
+            for i in range(n_devices):
+                try:
+                    cam_id = Aravis.get_device_id(i)
+                    # Some versions of Aravis might not have these methods or they might return None
+                    try: address = Aravis.get_device_address(i) 
+                    except: address = "Unknown"
+                    try: model = Aravis.get_device_model(i)
+                    except: model = "Unknown"
+                    try: vendor = Aravis.get_device_vendor(i)
+                    except: vendor = "Unknown"
+                    
+                    print(f"  - Index {i}: ID='{cam_id}' | IP={address} | Model='{model}' | Vendor='{vendor}'")
+                except Exception as e:
+                    print(f"  - Index {i}: Error retrieving details: {e}")
+            print("-" * 40 + "\n")
+    except Exception as e:
+        print(f"[WARN] Failed to list cameras: {e}\n")
+
 def main():
     Gst.init(None)
+    
+    # List cameras before starting to help debug ID issues
+    list_aravis_cameras()
+
     pipeline = Gst.Pipeline()
 
     # --- TOP BRANCH ---
