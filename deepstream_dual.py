@@ -252,6 +252,7 @@ def create_source_bin(source_id, bin_name):
     caps = Gst.ElementFactory.make("capsfilter", "caps")
     caps.set_property("caps", Gst.Caps.from_string("video/x-raw(memory:NVMM), format=NV12"))
 
+    # Add elements to bin
     Gst.Bin.add(bin_obj, src)
     Gst.Bin.add(bin_obj, conv1)
     Gst.Bin.add(bin_obj, nvconv)
