@@ -44,7 +44,7 @@ SIDE_CONFIG = "config_infer_primary_yoloV8_side.txt"
 CAMERA_WIDTH = 1920
 CAMERA_HEIGHT = 1080
 CAMERA_FPS = 30
-CAMERA_EXPOSURE = 20000  # microseconds
+CAMERA_EXPOSURE = 11000  # microseconds
 CAMERA_PIXEL_FORMAT = "BayerRG8"  # Common for Hikrobot cameras
 
 # --- VIEW SETTINGS (MANUAL ADJUSTMENT) ---
